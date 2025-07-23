@@ -3,9 +3,12 @@ const https = require('https');
 const url = require('url');
 
 const PORT = process.env.PORT || 8080;
+const cache = new Map();
+
+const CACHE_TTL = 60 * 1000; // 1 minute cache TTL
 
 const server = http.createServer((req, res) => {
-  // Enable CORS so it can be called from anywhere
+  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -23,19 +26,39 @@ const server = http.createServer((req, res) => {
     return res.end('Please provide a URL parameter like ?url=https://example.com');
   }
 
-  // Validate the URL and add protocol if missing
   let fetchUrl = targetUrl;
   if (!/^https?:\/\//i.test(fetchUrl)) {
     fetchUrl = 'http://' + fetchUrl;
   }
 
-  // Choose http or https module
+  // Check cache
+  const cached = cache.get(fetchUrl);
+  if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+    res.writeHead(200, { 'Content-Type': cached.contentType });
+    return res.end(cached.data);
+  }
+
   const client = fetchUrl.startsWith('https') ? https : http;
 
   client.get(fetchUrl, (proxyRes) => {
-    // Pipe response headers and status code
-    res.writeHead(proxyRes.statusCode, proxyRes.headers);
-    proxyRes.pipe(res);
+    const chunks = [];
+
+    proxyRes.on('data', chunk => chunks.push(chunk));
+    proxyRes.on('end', () => {
+      const data = Buffer.concat(chunks);
+
+      // Cache the response body and content type
+      cache.set(fetchUrl, {
+        data,
+        timestamp: Date.now(),
+        contentType: proxyRes.headers['content-type'] || 'application/octet-stream'
+      });
+
+      // Forward status and headers to client
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      res.end(data);
+    });
+
   }).on('error', (err) => {
     res.writeHead(500, { 'Content-Type': 'text/plain' });
     res.end('Error fetching the URL: ' + err.message);
